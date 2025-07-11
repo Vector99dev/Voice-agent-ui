@@ -31,6 +31,7 @@ export default function VoiceChat() {
   const [properties, setProperties] = useState<Property[]>([])
   const [conversationStage, setConversationStage] = useState<'needs' | 'properties' | 'details' | 'contact'>('needs')
   const [isLoading, setIsLoading] = useState(false)
+  const [messageCounter, setMessageCounter] = useState(0)
   
   const roomRef = useRef<Room | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -117,85 +118,62 @@ export default function VoiceChat() {
   }, [messages])
 
   const addMessage = (text: string, sender: 'user' | 'agent') => {
+    setMessageCounter(prev => prev + 1)
+    const newId = (messageCounter + 1).toString()
     const newMessage: Message = {
-      id: Date.now().toString(),
+      id: newId,
       text,
       sender,
       timestamp: new Date()
     }
     setMessages(prev => [...prev, newMessage])
+    return newId
   }
 
-  const callChatAPI = async (message: string): Promise<string> => {
-    try {
-      const response = await fetch('http://localhost:8000/chat/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ message }),
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-
-      const data = await response.json()
-      
-      if (data.success === false) {
-        throw new Error(data.error || 'Failed to get response from AI')
-      }
-
-      return data.response
-    } catch (error) {
-      console.error('Error calling chat API:', error)
-      return 'Sorry, I encountered an error. Please try again.'
+  const callChatAPIStream = async (message: string, onChunk: (chunk: string) => void): Promise<void> => {
+    const response = await fetch('http://localhost:8000/chat/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message }),
+    })
+    if (!response.body) {
+      onChunk('Sorry, I encountered an error. Please try again.')
+      return
     }
-  }
-
-  const startListening = async () => {
-    if (!isConnected) return
-
-    setIsListening(true)
-    
-    // Simulate speech recognition
-    setTimeout(() => {
-      const mockUserInput = "I'm looking for a 3-bedroom apartment in Tokyo with a budget around 100 million yen"
-      setCurrentInput(mockUserInput)
-      addMessage(mockUserInput, 'user')
-      setIsListening(false)
-      
-      // Clear the input after adding the message
-      setCurrentInput('')
-      
-      // Call backend API for response
-      setTimeout(() => {
-        handleAgentResponse(mockUserInput)
-      }, 1000)
-    }, 2000)
-  }
-
-  const stopListening = () => {
-    setIsListening(false)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let done = false
+    while (!done) {
+      const { value, done: doneReading } = await reader.read()
+      done = doneReading
+      if (value) {
+        onChunk(decoder.decode(value))
+      }
+    }
   }
 
   const handleAgentResponse = async (userInput: string) => {
     setIsLoading(true)
-    setIsAgentSpeaking(true)
-    
+    setIsAgentSpeaking(false)
+    let streamedText = ''
+    setMessageCounter(prev => prev + 1)
+    const agentMessageId = (messageCounter + 2).toString()
+    setMessages(prev => [...prev, { id: agentMessageId, text: '', sender: 'agent', timestamp: new Date() }])
     try {
-      // Call the backend chat API
-      const response = await callChatAPI(userInput)
-      addMessage(response, 'agent')
-      
+      await callChatAPIStream(userInput, (chunk) => {
+        streamedText += chunk
+        setMessages(prev => prev.map(m => m.id === agentMessageId ? { ...m, text: streamedText } : m))
+      })
       // Update conversation stage based on response content
-      if (response.toLowerCase().includes('property') || response.toLowerCase().includes('found')) {
+      if (streamedText.toLowerCase().includes('property') || streamedText.toLowerCase().includes('found')) {
         setProperties(mockProperties)
         setConversationStage('properties')
       }
     } catch (error) {
       console.error('Error getting agent response:', error)
-      addMessage('Sorry, I encountered an error. Please try again.', 'agent')
+      setMessages(prev => prev.map(m => m.id === agentMessageId ? { ...m, text: 'Sorry, I encountered an error. Please try again.' } : m))
     } finally {
       setIsLoading(false)
       setIsAgentSpeaking(false)
@@ -206,10 +184,11 @@ export default function VoiceChat() {
     if (!currentInput.trim() || isLoading) return
     
     const userMessage = currentInput.trim()
-    addMessage(userMessage, 'user')
+    // Only add the user's message as 'user' with a unique id
+    const userMessageId = addMessage(userMessage, 'user')
     setCurrentInput('')
     
-    // Call backend API for response
+    // Call backend API for response (this will only add/update an 'agent' message)
     await handleAgentResponse(userMessage)
   }
 
@@ -233,6 +212,32 @@ export default function VoiceChat() {
     return <p className="text-sm">{text}</p>
   }
 
+  const startListening = async () => {
+    if (!isConnected) return;
+
+    setIsListening(true);
+
+    // Simulate speech recognition
+    setTimeout(() => {
+      const mockUserInput = "I'm looking for a 3-bedroom apartment in Tokyo with a budget around 100 million yen";
+      setCurrentInput(mockUserInput);
+      addMessage(mockUserInput, 'user');
+      setIsListening(false);
+
+      // Clear the input after adding the message
+      setCurrentInput('');
+
+      // Call backend API for response
+      setTimeout(() => {
+        handleAgentResponse(mockUserInput);
+      }, 1000);
+    }, 2000);
+  };
+
+  const stopListening = () => {
+    setIsListening(false);
+  };
+
   return (
     <div className="max-w-6xl mx-auto">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -247,7 +252,18 @@ export default function VoiceChat() {
               <div className="flex items-center gap-2">
                 <div className={`w-2 h-2 rounded-full ${isAgentSpeaking ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
                 <span className="text-sm text-gray-500">
-                  {isAgentSpeaking ? 'Speaking...' : 'Ready'}
+                  {(() => {
+                    const lastAgentMsg = [...messages].reverse().find(m => m.sender === 'agent');
+                    if (isLoading) {
+                      if (lastAgentMsg && lastAgentMsg.text && lastAgentMsg.text.length > 0) {
+                        return 'Speaking...';
+                      } else {
+                        return 'Thinking...';
+                      }
+                    }
+                    if (isAgentSpeaking) return 'Speaking...';
+                    return 'Ready';
+                  })()}
                 </span>
               </div>
             </div>
@@ -266,10 +282,15 @@ export default function VoiceChat() {
                       : 'bg-gray-100 text-gray-800'
                   }`}
                 >
-                  {renderMessageContent(message.text, message.sender)}
-                  <p className="text-xs opacity-70 mt-1">
-                    {message.timestamp.toLocaleTimeString()}
-                  </p>
+                  {message.sender === 'agent' && message.text === '' ? (
+                    <div className="flex items-center justify-center h-6">
+                      <span className="dot-flashing">
+                        <span></span><span></span><span></span>
+                      </span>
+                    </div>
+                  ) : (
+                    renderMessageContent(message.text, message.sender)
+                  )}
                 </div>
               </div>
             ))}
