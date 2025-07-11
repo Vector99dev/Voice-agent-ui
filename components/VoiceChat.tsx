@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Mic, MicOff, Volume2, VolumeX, Send, Home, Building, User } from 'lucide-react'
 import { Room, RoomEvent, RemoteParticipant, LocalParticipant } from 'livekit-client'
+import ReactMarkdown from 'react-markdown'
 
 interface Message {
   id: string
@@ -29,6 +30,7 @@ export default function VoiceChat() {
   const [currentInput, setCurrentInput] = useState('')
   const [properties, setProperties] = useState<Property[]>([])
   const [conversationStage, setConversationStage] = useState<'needs' | 'properties' | 'details' | 'contact'>('needs')
+  const [isLoading, setIsLoading] = useState(false)
   
   const roomRef = useRef<Room | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -124,6 +126,33 @@ export default function VoiceChat() {
     setMessages(prev => [...prev, newMessage])
   }
 
+  const callChatAPI = async (message: string): Promise<string> => {
+    try {
+      const response = await fetch('http://localhost:8000/chat/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const data = await response.json()
+      
+      if (data.success === false) {
+        throw new Error(data.error || 'Failed to get response from AI')
+      }
+
+      return data.response
+    } catch (error) {
+      console.error('Error calling chat API:', error)
+      return 'Sorry, I encountered an error. Please try again.'
+    }
+  }
+
   const startListening = async () => {
     if (!isConnected) return
 
@@ -139,7 +168,7 @@ export default function VoiceChat() {
       // Clear the input after adding the message
       setCurrentInput('')
       
-      // Simulate agent response
+      // Call backend API for response
       setTimeout(() => {
         handleAgentResponse(mockUserInput)
       }, 1000)
@@ -150,52 +179,58 @@ export default function VoiceChat() {
     setIsListening(false)
   }
 
-  const handleAgentResponse = (userInput: string) => {
-    let response = ''
-    
-    switch (conversationStage) {
-      case 'needs':
-        response = "Great! I understand you're looking for a 3-bedroom apartment in Tokyo with a budget around 100 million yen. Let me search for some properties that match your criteria."
-        setProperties(mockProperties)
-        setConversationStage('properties')
-        break
-      case 'properties':
-        response = "I've found some excellent properties for you. Here are 3 options that match your requirements. Would you like me to tell you more about any of these properties?"
-        break
-      case 'details':
-        response = "This property features modern amenities, excellent location, and fits perfectly within your budget. Would you like to speak with one of our sales representatives for more detailed information?"
-        setConversationStage('contact')
-        break
-      case 'contact':
-        response = "Perfect! I'll connect you with our sales team. May I have your contact information so we can follow up with you?"
-        break
-    }
-    
-    addMessage(response, 'agent')
+  const handleAgentResponse = async (userInput: string) => {
+    setIsLoading(true)
     setIsAgentSpeaking(true)
     
-    // Simulate TTS
-    setTimeout(() => {
+    try {
+      // Call the backend chat API
+      const response = await callChatAPI(userInput)
+      addMessage(response, 'agent')
+      
+      // Update conversation stage based on response content
+      if (response.toLowerCase().includes('property') || response.toLowerCase().includes('found')) {
+        setProperties(mockProperties)
+        setConversationStage('properties')
+      }
+    } catch (error) {
+      console.error('Error getting agent response:', error)
+      addMessage('Sorry, I encountered an error. Please try again.', 'agent')
+    } finally {
+      setIsLoading(false)
       setIsAgentSpeaking(false)
-    }, 3000)
+    }
   }
 
-  const handleSendMessage = () => {
-    if (!currentInput.trim()) return
+  const handleSendMessage = async () => {
+    if (!currentInput.trim() || isLoading) return
     
-    addMessage(currentInput, 'user')
+    const userMessage = currentInput.trim()
+    addMessage(userMessage, 'user')
     setCurrentInput('')
     
-    // Simulate agent response
-    setTimeout(() => {
-      handleAgentResponse(currentInput)
-    }, 1000)
+    // Call backend API for response
+    await handleAgentResponse(userMessage)
   }
 
   const selectProperty = (property: Property) => {
     const response = `Great choice! Let me tell you more about the ${property.title}. This ${property.type.toLowerCase()} is located in ${property.location} and is priced at ${property.price}. It features ${property.features.join(', ')}. Would you like to know more about this property?`
     addMessage(response, 'agent')
     setConversationStage('details')
+  }
+
+  const renderMessageContent = (text: string, sender: 'user' | 'agent') => {
+    if (sender === 'agent') {
+      return (
+        <div className="prose prose-sm max-w-none">
+          <ReactMarkdown>
+            {text}
+          </ReactMarkdown>
+        </div>
+      )
+    }
+    
+    return <p className="text-sm">{text}</p>
   }
 
   return (
@@ -231,7 +266,7 @@ export default function VoiceChat() {
                       : 'bg-gray-100 text-gray-800'
                   }`}
                 >
-                  <p className="text-sm">{message.text}</p>
+                  {renderMessageContent(message.text, message.sender)}
                   <p className="text-xs opacity-70 mt-1">
                     {message.timestamp.toLocaleTimeString()}
                   </p>
@@ -298,12 +333,18 @@ export default function VoiceChat() {
                 placeholder="Type your message here..."
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                disabled={isLoading}
               />
               <button
                 onClick={handleSendMessage}
-                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                disabled={isLoading || !currentInput.trim()}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
               >
-                <Send className="w-4 h-4" />
+                {isLoading ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
               </button>
             </div>
           </div>
@@ -348,4 +389,4 @@ export default function VoiceChat() {
       </div>
     </div>
   )
-} 
+}
